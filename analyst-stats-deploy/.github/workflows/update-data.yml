@@ -1,0 +1,39 @@
+name: Update Data from Google Sheets
+
+on:
+  schedule:
+    # 每天台灣時間早上 8:00 執行 (UTC 00:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 允許手動觸發
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Download latest CSV from Google Sheets
+        run: |
+          curl -L "https://docs.google.com/spreadsheets/d/e/2PACX-1vSBshk6G2cVXteIp9tuA_Fgdpb1LqR6futGlI2luo_Z0bKj2W6u42iTJbkhC0GB-x77pXrLom_ifu5Y/pub?output=csv" -o client/public/analyst_data.csv
+      
+      - name: Check if data changed
+        id: check_changes
+        run: |
+          git diff --quiet client/public/analyst_data.csv || echo "changed=true" >> $GITHUB_OUTPUT
+      
+      - name: Commit and push if changed
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add client/public/analyst_data.csv
+          git commit -m "Auto-update: Refresh data from Google Sheets [$(date +'%Y-%m-%d %H:%M:%S')]"
+          git push
+      
+      - name: Trigger Netlify Deploy
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          curl -X POST -d {} ${{ secrets.NETLIFY_BUILD_HOOK }}
+
