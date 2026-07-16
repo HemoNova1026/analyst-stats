@@ -1,105 +1,229 @@
 import csv
-from datetime import datetime, timedelta
-from collections import defaultdict
+import io
 import json
+import os
+import re
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 
-# 讀取原始 CSV
-analysts_data = defaultdict(list)
-with open('/home/ubuntu/analyst_data.csv', 'r', encoding='utf-8') as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        analyst = row['分析師']
-        analysts_data[analyst].append(row)
+import requests
 
-# 分類信息
-categories = {
-    '大華國際投顧': ['阮蕙慈', '洪士哲', '張志誠', '林睿閎', '顏至恆', '羅文彬'],
-    '大來國際投顧': ['葉子暘', '陳彥蓉', '蔡宗園', '蔡正華', '謝逸文', '周弘', '丁兆宇', '余正君', '劉艾綸', '張立旻', '蘇麗芬', '蘇建豐']
+CSV_URL = os.environ.get(
+    "GOOGLE_SHEET_CSV_URL",
+    "https://docs.google.com/spreadsheets/d/12g0ikHklbVfCc4jdes5YQdcxyjFzTFGaeLTyIvpdvMg/export?format=csv&gid=1581904899",
+)
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "client" / "src" / "data"
+ANALYSTS_BY_DATE_PATH = DATA_DIR / "analysts_by_date.json"
+ALL_DATA_PATH = DATA_DIR / "all_data.json"
+
+DAIHUA = ["阮蕙慈", "洪士哲", "張志誠", "林睿閎", "羅文彬", "顏至恆", "丁兆宇", "劉艾綸"]
+DALAI = ["葉子暘", "陳彥蓉", "蔡宗園", "蔡正華", "謝逸文", "周弘", "蘇麗芬", "張立旻"]
+
+REQUIRED_COLUMNS = {
+    "分析師",
+    "日期",
+    "累積好友數",
+    "可觸及人數",
+    "封鎖數",
+    "封鎖率",
+    "昨日增加人數",
+    "昨日封鎖人數",
 }
 
-def parse_number(s):
-    """解析數字，移除逗號"""
-    if not s:
+
+def clean(value):
+    return str(value or "").strip()
+
+
+def parse_int(value):
+    text = clean(value).replace(",", "")
+    if not text:
         return 0
-    return int(s.replace(',', ''))
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
 
-# 計算增長數據
-def calculate_growth(analyst_records, target_date_str, days_back):
-    """計算指定天數內的增長"""
-    target_date = datetime.strptime(target_date_str, '%Y%m%d')
-    start_date = target_date - timedelta(days=days_back)
-    
-    # 找到目標日期的記錄
-    target_record = None
-    start_record = None
-    
-    for record in analyst_records:
-        record_date = datetime.strptime(record['日期'], '%Y%m%d')
-        if record_date == target_date:
-            target_record = record
-        if record_date == start_date:
-            start_record = record
-    
-    if target_record and start_record:
-        target_friends = parse_number(target_record['累積好友數'])
-        start_friends = parse_number(start_record['累積好友數'])
-        return target_friends - start_friends
-    elif target_record and not start_record:
-        # 如果沒有開始日期，返回累積好友數
-        return parse_number(target_record['累積好友數'])
-    return 0
 
-# 生成最新日期的數據
-latest_date = '20260624'
+def parse_rate(value):
+    text = clean(value).replace("%", "")
+    if not text:
+        return 0.0
 
-output_data = {}
-for category, analysts in categories.items():
-    output_data[category] = []
-    for analyst in analysts:
-        if analyst in analysts_data:
-            records = analysts_data[analyst]
-            # 找到最新日期的記錄
-            latest_record = None
-            for record in records:
-                if record['日期'] == latest_date:
-                    latest_record = record
-                    break
-            
-            if latest_record:
-                # 計算不同時間段的增長
-                week_growth = calculate_growth(records, latest_date, 7)
-                month_growth = calculate_growth(records, latest_date, 30)
-                year_growth = calculate_growth(records, latest_date, 365)
-                
-                analyst_info = {
-                    'name': analyst,
-                    'date': latest_date,
-                    'friends': parse_number(latest_record['累積好友數']),
-                    'reachable': parse_number(latest_record['可觸及人數']),
-                    'blocked': parse_number(latest_record['封鎖數']),
-                    'block_rate': latest_record['封鎖率'],
-                    'week_growth': week_growth,
-                    'month_growth': month_growth,
-                    'year_growth': year_growth,
-                    'yesterday_added': parse_number(latest_record['昨日增加人數']),
-                    'yesterday_blocked': parse_number(latest_record['昨日封鎖人數']),
-                }
-                output_data[category].append(analyst_info)
+    try:
+        number = float(text)
+    except ValueError:
+        return 0.0
 
-# 保存為 JSON
-with open('/home/ubuntu/analyst-stats/client/src/data/analysts.json', 'w', encoding='utf-8') as f:
-    json.dump(output_data, f, ensure_ascii=False, indent=2)
+    # Google Sheet 可能輸出 0.1877，也可能輸出 18.77%
+    if number <= 1:
+        number *= 100
 
-print("✓ 數據生成完成")
-print(f"大華國際投顧: {len(output_data['大華國際投顧'])} 位分析師")
-print(f"大來國際投顧: {len(output_data['大來國際投顧'])} 位分析師")
+    return round(number, 2)
 
-# 保存完整數據供詳細頁使用
-all_data_dict = {}
-for analyst, records in analysts_data.items():
-    all_data_dict[analyst] = records
 
-with open('/home/ubuntu/analyst-stats/client/src/data/all_data.json', 'w', encoding='utf-8') as f:
-    json.dump(all_data_dict, f, ensure_ascii=False, indent=2)
+def normalize_date(value):
+    text = clean(value)
 
-print("✓ 完整數據已保存")
+    if not text:
+        return ""
+
+    digits = re.sub(r"\D", "", text)
+
+    if len(digits) == 8:
+        year, month, day = digits[:4], digits[4:6], digits[6:8]
+    else:
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                return dt.strftime("%Y/%m/%d")
+            except ValueError:
+                pass
+        return ""
+
+    try:
+        dt = datetime(int(year), int(month), int(day))
+        return dt.strftime("%Y/%m/%d")
+    except ValueError:
+        return ""
+
+
+def download_rows():
+    response = requests.get(CSV_URL, timeout=60)
+    response.raise_for_status()
+
+    text = response.content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+
+    if not reader.fieldnames:
+        raise RuntimeError("CSV 沒有標題列。")
+
+    fieldnames = {clean(name) for name in reader.fieldnames}
+    missing = REQUIRED_COLUMNS - fieldnames
+
+    if missing:
+        raise RuntimeError(
+            "CSV 缺少必要欄位：" + "、".join(sorted(missing))
+        )
+
+    rows = []
+
+    for raw in reader:
+        row = {clean(k): clean(v) for k, v in raw.items() if k is not None}
+        name = row.get("分析師", "")
+        date = normalize_date(row.get("日期", ""))
+
+        if not name or not date:
+            continue
+
+        row["日期"] = date.replace("/", "")
+        rows.append(row)
+
+    if not rows:
+        raise RuntimeError(
+            "CSV 沒有可用資料。請確認 Google Sheet 已公開，且 gid 指向 AllData 分頁。"
+        )
+
+    return rows
+
+
+def build_outputs(rows):
+    all_data = defaultdict(list)
+    analysts_by_date = defaultdict(lambda: {"large": [], "small": []})
+
+    # 同一位分析師同一天若重複，保留最後一筆
+    dedup = {}
+
+    for row in rows:
+        key = (row["分析師"], row["日期"])
+        dedup[key] = row
+
+    sorted_rows = sorted(
+        dedup.values(),
+        key=lambda r: (r["日期"], r["分析師"]),
+    )
+
+    for row in sorted_rows:
+        name = row["分析師"]
+        yyyymmdd = row["日期"]
+        display_date = datetime.strptime(yyyymmdd, "%Y%m%d").strftime("%Y/%m/%d")
+
+        normalized_row = {
+            "分析師": name,
+            "日期": yyyymmdd,
+            "累積好友數": str(parse_int(row.get("累積好友數"))),
+            "可觸及人數": str(parse_int(row.get("可觸及人數"))),
+            "封鎖數": str(parse_int(row.get("封鎖數"))),
+            "封鎖率": f"{parse_rate(row.get('封鎖率')):.2f}%",
+            "昨日增加人數": str(parse_int(row.get("昨日增加人數"))),
+            "昨日封鎖人數": str(parse_int(row.get("昨日封鎖人數"))),
+        }
+
+        all_data[name].append(normalized_row)
+
+        card = {
+            "name": name,
+            "cumulative_friends": parse_int(row.get("累積好友數")),
+            "daily_new": parse_int(row.get("昨日增加人數")),
+            "block_count": parse_int(row.get("封鎖數")),
+            "block_rate": parse_rate(row.get("封鎖率")),
+        }
+
+        if name in DAIHUA:
+            analysts_by_date[display_date]["large"].append(card)
+        elif name in DALAI:
+            analysts_by_date[display_date]["small"].append(card)
+
+    # 固定顯示順序
+    daihua_order = {name: index for index, name in enumerate(DAIHUA)}
+    dalai_order = {name: index for index, name in enumerate(DALAI)}
+
+    for date_data in analysts_by_date.values():
+        date_data["large"].sort(
+            key=lambda item: daihua_order.get(item["name"], 999)
+        )
+        date_data["small"].sort(
+            key=lambda item: dalai_order.get(item["name"], 999)
+        )
+
+    return dict(analysts_by_date), dict(all_data)
+
+
+def main():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    rows = download_rows()
+    analysts_by_date, all_data = build_outputs(rows)
+
+    ANALYSTS_BY_DATE_PATH.write_text(
+        json.dumps(
+            analysts_by_date,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    ALL_DATA_PATH.write_text(
+        json.dumps(
+            all_data,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    latest_date = max(analysts_by_date.keys())
+
+    print(f"CSV rows: {len(rows)}")
+    print(f"Latest date: {latest_date}")
+    print(f"Updated: {ANALYSTS_BY_DATE_PATH}")
+    print(f"Updated: {ALL_DATA_PATH}")
+
+
+if __name__ == "__main__":
+    main()
